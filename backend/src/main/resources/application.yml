@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: policy-agent
+  ai:
+    ollama:
+      # Ollama server endpoint (ensure it's running: ollama serve)
+      base-url: http://localhost:11434
+      chat:
+        options:
+          # Model to use. Available models: ollama list
+          model: llama3
+  datasource:
+    url: jdbc:h2:file:./data/policydb
+    driverClassName: org.h2.Driver
+    username: sa
+    password: ""
+
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+# Logging configuration
+logging:
+  level:
+    root: INFO
+    org.springframework: INFO
+    org.springframework.ai: DEBUG
+    com.example.policyagent: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
