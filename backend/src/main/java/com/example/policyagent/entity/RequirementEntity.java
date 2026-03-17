@@ -3,6 +3,9 @@ package com.example.policyagent.entity;
 import jakarta.persistence.*;
 
 @Entity
+@Table(indexes = {
+    @Index(name = "idx_req_update", columnList = "regulatoryUpdateId")
+})
 public class RequirementEntity {
 
     @Id
@@ -20,13 +23,14 @@ public class RequirementEntity {
 
     private String recommendation;
 
-    // getters & setters
+    private String impactedBusinessLine;
+
+    private String impactedSystem;
+
+    // getters setters
+
     public Long getId() {
         return id;
-    }
-
-    public void setId(Long id) {
-        this.id = id;
     }
 
     public Long getRegulatoryUpdateId() {
@@ -53,7 +57,7 @@ public class RequirementEntity {
         this.type = type;
     }
 
-    public Boolean isSatisfied() {
+    public Boolean getSatisfied() {
         return satisfied;
     }
 
@@ -67,5 +71,21 @@ public class RequirementEntity {
 
     public void setRecommendation(String recommendation) {
         this.recommendation = recommendation;
+    }
+
+    public String getImpactedBusinessLine() {
+        return impactedBusinessLine;
+    }
+
+    public void setImpactedBusinessLine(String impactedBusinessLine) {
+        this.impactedBusinessLine = impactedBusinessLine;
+    }
+
+    public String getImpactedSystem() {
+        return impactedSystem;
+    }
+
+    public void setImpactedSystem(String impactedSystem) {
+        this.impactedSystem = impactedSystem;
     }
 }

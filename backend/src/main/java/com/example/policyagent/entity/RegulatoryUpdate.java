@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import java.time.Instant;
 
 @Entity
+@Table(indexes = {
+    @Index(name = "idx_reg_update_source", columnList = "sourceLink")
+})
 public class RegulatoryUpdate {
 
     @Id
@@ -24,6 +27,9 @@ public class RegulatoryUpdate {
     private Double confidenceScore;
 
     private Instant createdAt = Instant.now();
+
+    @Column(unique = true, nullable = true)
+    private String sourceLink;
 
     // getters & setters
     public Long getId() {
@@ -88,5 +94,13 @@ public class RegulatoryUpdate {
 
     public void setCreatedAt(Instant createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getSourceLink() {
+        return sourceLink;
+    }
+
+    public void setSourceLink(String sourceLink) {
+        this.sourceLink = sourceLink;
     }
 }

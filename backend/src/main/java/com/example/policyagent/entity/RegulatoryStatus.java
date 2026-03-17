@@ -11,6 +11,8 @@ public enum RegulatoryStatus {
 
     public boolean canTransitionTo(RegulatoryStatus target) {
 
+        if (this == target) return false;
+
         return switch (this) {
             case NEW -> target == ANALYZED;
             case ANALYZED -> target == REVIEW_PENDING;

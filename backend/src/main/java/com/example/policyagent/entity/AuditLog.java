@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import java.time.Instant;
 
 @Entity
+@Table(indexes = {
+    @Index(name="idx_audit_timestamp", columnList="timestamp")
+})
 public class AuditLog {
 
     @Id

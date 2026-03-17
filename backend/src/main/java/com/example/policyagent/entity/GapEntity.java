@@ -3,6 +3,9 @@ package com.example.policyagent.entity;
 import jakarta.persistence.*;
 
 @Entity
+@Table(indexes = {
+    @Index(name = "idx_gap_requirement", columnList = "requirementId")
+})
 public class GapEntity {
 
     @Id

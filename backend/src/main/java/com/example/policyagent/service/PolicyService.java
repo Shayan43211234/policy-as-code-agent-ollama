@@ -4,6 +4,7 @@ import com.example.policyagent.entity.*;
 import com.example.policyagent.repository.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.ai.chat.ChatClient;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -13,8 +14,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 @Service
 public class PolicyService {
@@ -48,68 +47,51 @@ public class PolicyService {
         this.codeSpecificationRepository = codeSpecificationRepository;
     }
 
-    // ================= CACHE =================
-
-    private static final int CACHE_MAX_SIZE = 10;
-
-    private final Map<String, CachedAnalysis> analysisCache = java.util.Collections.synchronizedMap(
-            new LinkedHashMap<String, CachedAnalysis>(CACHE_MAX_SIZE + 1, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, CachedAnalysis> eldest) {
-                    return size() > CACHE_MAX_SIZE;
-                }
-            });
-
-    private static class CachedAnalysis {
-        final JsonNode parsed;
-        final long timestamp;
-
-        CachedAnalysis(JsonNode parsed) {
-            this.parsed = parsed;
-            this.timestamp = System.currentTimeMillis();
-        }
-    }
-
-    private String createCacheKey(String existingPolicy, String newRegulation) {
-        return Integer.toHexString((existingPolicy + "||" + newRegulation).hashCode());
-    }
-
     // ================= MAIN ANALYSIS =================
 
     @Transactional
-    public JsonNode analyzeAndParse(String existingPolicy, String newRegulation) {
-
-        String cacheKey = createCacheKey(existingPolicy, newRegulation);
-        logger.info("=== analyzeAndParse() START === cache key: {}", cacheKey);
-
-        synchronized (analysisCache) {
-            CachedAnalysis cached = analysisCache.get(cacheKey);
-            if (cached != null) {
-                logger.info("Cache HIT - returning cached analysis");
-                return cached.parsed;
-            }
-        }
+    public JsonNode analyzeAndParse(String existingPolicy, String newRegulation, String sourceLink) {
 
         logger.info("Cache MISS - calling LLM for new analysis");
 
+        // RSS duplicate protection (manual analysis allowed)
+        if (sourceLink != null && updateRepository.existsBySourceLink(sourceLink)) {
+
+            logger.info("Duplicate feed detected. Returning existing analysis for: {}", sourceLink);
+
+            RegulatoryUpdate existing = updateRepository.findBySourceLink(sourceLink).orElse(null);
+
+            if (existing != null) {
+
+                ObjectNode result = objectMapper.createObjectNode();
+
+                result.put("agentName", "Policy-as-Code Regulatory Change Agent");
+                result.put("changeDetected", true);
+
+                result.put("confidenceScore", existing.getConfidenceScore());
+
+                result.set("requirements", objectMapper.createArrayNode());
+                result.set("gapReport", objectMapper.createArrayNode());
+                result.set("policyDrafts", objectMapper.createArrayNode());
+                result.set("codeSpecifications", objectMapper.createArrayNode());
+
+                result.set("summary", objectMapper.createObjectNode());
+
+                return result;
+            }
+
+        }
+
         String raw = analyze(existingPolicy, newRegulation);
-        logger.info("Raw LLM response length: {} characters", raw.length());
+        logger.info("Raw LLM response length: {}", raw.length());
 
         JsonNode parsed = safeParse(raw);
 
         if (parsed != null && !parsed.has("error")) {
-            logger.info("JSON parsed successfully, attempting to persist analysis");
-            Long savedId = persistAnalysis(parsed, newRegulation);
+            Long savedId = persistAnalysis(parsed, newRegulation, sourceLink);
             logger.info("Analysis persisted successfully with regulatory update ID: {}", savedId);
-        } else {
-            logger.error("JSON parsing failed or returned error - analysis will NOT be persisted");
         }
 
-        synchronized (analysisCache) {
-            analysisCache.put(cacheKey, new CachedAnalysis(parsed));
-        }
-
-        logger.info("=== analyzeAndParse() END ===");
         return parsed;
     }
 
@@ -125,6 +107,35 @@ public class PolicyService {
                 - Do NOT use markdown.
                 - Do NOT wrap in triple backticks.
                 - Output must start with { and end with }.
+                - Be precise and deterministic.
+
+                COMPARISON RULES:
+                - Carefully compare numerical values (days, amounts, thresholds).
+                - Carefully compare frequencies (e.g., 180 days vs 180 days).
+                - If the existing policy already satisfies the regulation requirement,
+                  then set:
+                      "satisfied": true
+                      "recommendation": "no_action"
+                - Only mark "satisfied": false if there is a real gap.
+                - Do NOT create artificial gaps.
+                - If values are equal, it is satisfied.
+
+                The bank has the following business lines:
+                - Retail Banking
+                - Commercial Lending
+                - Wealth Management
+                - Treasury
+
+                The bank has the following systems:
+                - Vendor Risk System
+                - Core Banking Platform
+                - AML Monitoring Engine
+                - Payments Gateway
+
+                For EACH requirement:
+                - Determine if it is already satisfied by the Existing Policy.
+                - Determine which ONE business line is primarily impacted.
+                - Determine which ONE system is primarily impacted.
 
                 Return JSON exactly in this structure:
 
@@ -140,7 +151,9 @@ public class PolicyService {
                       "tests": [],
                       "satisfied": false,
                       "rationale": "",
-                      "recommendation": "no_action|update_policy|add_control|implement_system_rule"
+                      "recommendation": "no_action|update_policy|add_control|implement_system_rule",
+                      "impactedBusinessLine": "",
+                      "impactedSystem": ""
                     }
                   ],
                   "summary": {
@@ -232,7 +245,16 @@ public class PolicyService {
     // ================= PERSISTENCE =================
 
     @Transactional
-    private Long persistAnalysis(JsonNode root, String regulationText) {
+    private Long persistAnalysis(JsonNode root, String regulationText, String sourceLink) {
+
+        if (sourceLink != null && updateRepository.existsBySourceLink(sourceLink)) {
+            logger.info("Duplicate feed ignored during persistence: {}", sourceLink);
+            return null;
+        }
+
+        ArrayNode gapArray = objectMapper.createArrayNode();
+        ArrayNode draftArray = objectMapper.createArrayNode();
+        ArrayNode specArray = objectMapper.createArrayNode();
 
         logger.info("=== persistAnalysis() START ===");
 
@@ -243,14 +265,23 @@ public class PolicyService {
             // ==========================
 
             RegulatoryUpdate update = new RegulatoryUpdate();
-            update.setTitle("Manual Submission");
-            update.setAuthority("Manual Input");
+
+            if (sourceLink != null) {
+                update.setTitle("Regulatory Feed");
+                update.setAuthority("External Feed");
+                update.setSourceLink(sourceLink);
+            } else {
+                update.setTitle("Manual Submission");
+                update.setAuthority("Manual Input");
+            }
+
             update.setFullText(regulationText);
             update.setStatus(RegulatoryStatus.ANALYZED);
             update.setPublicationDate(Instant.now());
             update.setConfidenceScore(root.path("confidenceScore").asDouble(0.75));
 
             update = updateRepository.save(update);
+
             logger.info("RegulatoryUpdate saved with ID: {}", update.getId());
 
             // ==========================
@@ -274,32 +305,27 @@ public class PolicyService {
                     req.setType(r.path("type").asText());
                     req.setSatisfied(r.path("satisfied").asBoolean());
 
-                    String recommendation = r.path("recommendation").asText();
-                    if (recommendation == null || recommendation.isBlank()) {
-                        recommendation = "no_action";
-                    }
-                    String text = r.path("text").asText().toLowerCase();
-                    String type = r.path("type").asText().toLowerCase();
-
-                    // Enterprise override logic
-                    boolean looksLikeRule = text.contains("exceeds")
-                            || text.contains("greater than")
-                            || text.contains("less than")
-                            || text.contains("if ")
-                            || text.contains(" and ")
-                            || text.matches(".*\\d+.*"); // contains numbers
-
-                    if (("add_control".equalsIgnoreCase(recommendation) && looksLikeRule)
-                            || text.contains("automatically")
-                            || text.contains("system")) {
-
-                        recommendation = "implement_system_rule";
-                        logger.info("Backend override triggered → implement_system_rule");
-                    }
-
+                    String recommendation = r.path("recommendation").asText("no_action");
                     req.setRecommendation(recommendation);
 
+                    String impactedBusinessLine = r.path("impactedBusinessLine").asText(null);
+                    String impactedSystem = r.path("impactedSystem").asText(null);
+
+                    req.setImpactedBusinessLine(
+                            impactedBusinessLine != null && !impactedBusinessLine.isBlank()
+                                    ? impactedBusinessLine
+                                    : "Unknown");
+
+                    req.setImpactedSystem(
+                            impactedSystem != null && !impactedSystem.isBlank()
+                                    ? impactedSystem
+                                    : "Unknown");
+
                     req = requirementRepository.save(req);
+
+                    // expose DB id to frontend
+                    ((ObjectNode) r).put("dbId", req.getId());
+
                     reqCount++;
 
                     logger.info("Requirement saved ID: {}", req.getId());
@@ -320,9 +346,17 @@ public class PolicyService {
                                 gap.setRequirementId(req.getId());
                                 gap.setIssue(g.path("issue").asText("Regulatory gap identified"));
                                 gap.setDetail(g.path("detail").asText("Gap detected based on LLM analysis."));
+
                                 gapRepository.save(gap);
 
                                 gapCreatedFromLLM = true;
+
+                                ObjectNode gapJson = objectMapper.createObjectNode();
+                                gapJson.put("requirementId", req.getId());
+                                gapJson.put("issue", gap.getIssue());
+                                gapJson.put("detail", gap.getDetail());
+
+                                gapArray.add(gapJson);
 
                                 logger.info("Gap saved from LLM for requirement ID: {}", req.getId());
                             }
@@ -330,7 +364,7 @@ public class PolicyService {
                     }
 
                     // Backend enforced gap
-                    if (!req.isSatisfied() && !gapCreatedFromLLM) {
+                    if (!req.getSatisfied() && !gapCreatedFromLLM) {
 
                         GapEntity autoGap = new GapEntity();
                         autoGap.setRequirementId(req.getId());
@@ -341,11 +375,18 @@ public class PolicyService {
 
                         gapRepository.save(autoGap);
 
+                        ObjectNode gapJson = objectMapper.createObjectNode();
+                        gapJson.put("requirementId", req.getId());
+                        gapJson.put("issue", autoGap.getIssue());
+                        gapJson.put("detail", autoGap.getDetail());
+
+                        gapArray.add(gapJson);
+
                         logger.info("Auto-generated gap for requirement ID: {}", req.getId());
                     }
 
                     // ==========================
-                    // 4. POLICY DRAFT ENFORCEMENT
+                    // 4. POLICY DRAFT
                     // ==========================
 
                     if ("update_policy".equalsIgnoreCase(req.getRecommendation())) {
@@ -361,9 +402,17 @@ public class PolicyService {
                                     PolicyDraftEntity draft = new PolicyDraftEntity();
                                     draft.setRequirementId(req.getId());
                                     draft.setDraft(d.path("draft").asText());
+
                                     policyDraftRepository.save(draft);
 
                                     draftCreated = true;
+
+                                    ObjectNode draftJson = objectMapper.createObjectNode();
+                                    draftJson.put("requirementId", req.getId());
+                                    draftJson.put("draft", draft.getDraft());
+
+                                    draftArray.add(draftJson);
+
                                     logger.info("Policy draft saved from LLM for requirement ID: {}", req.getId());
                                 }
                             }
@@ -379,12 +428,18 @@ public class PolicyService {
 
                             policyDraftRepository.save(autoDraft);
 
+                            ObjectNode draftJson = objectMapper.createObjectNode();
+                            draftJson.put("requirementId", req.getId());
+                            draftJson.put("draft", autoDraft.getDraft());
+
+                            draftArray.add(draftJson);
+
                             logger.info("Auto-generated policy draft for requirement ID: {}", req.getId());
                         }
                     }
 
                     // ==========================
-                    // 5. CODE SPEC ENFORCEMENT
+                    // 5. CODE SPEC
                     // ==========================
 
                     if ("implement_system_rule".equalsIgnoreCase(req.getRecommendation())) {
@@ -400,9 +455,16 @@ public class PolicyService {
                                     CodeSpecificationEntity spec = new CodeSpecificationEntity();
                                     spec.setRequirementId(req.getId());
                                     spec.setSpecification(s.path("spec").asText());
+
                                     codeSpecificationRepository.save(spec);
 
                                     specCreated = true;
+
+                                    ObjectNode specJson = objectMapper.createObjectNode();
+                                    specJson.put("requirementId", req.getId());
+                                    specJson.put("spec", spec.getSpecification());
+
+                                    specArray.add(specJson);
 
                                     logger.info("Code spec saved from LLM for requirement ID: {}", req.getId());
                                 }
@@ -420,11 +482,25 @@ public class PolicyService {
 
                             codeSpecificationRepository.save(autoSpec);
 
+                            ObjectNode specJson = objectMapper.createObjectNode();
+                            specJson.put("requirementId", req.getId());
+                            specJson.put("spec", autoSpec.getSpecification());
+
+                            specArray.add(specJson);
+
                             logger.info("Auto-generated code specification for requirement ID: {}", req.getId());
                         }
                     }
                 }
             }
+
+            // ==========================
+            // ATTACH DB DATA TO RESPONSE
+            // ==========================
+
+            ((ObjectNode) root).set("gapReport", gapArray);
+            ((ObjectNode) root).set("policyDrafts", draftArray);
+            ((ObjectNode) root).set("codeSpecifications", specArray);
 
             // ==========================
             // 6. AUDIT LOG
@@ -439,6 +515,7 @@ public class PolicyService {
             auditRepository.save(log);
 
             logger.info("=== persistAnalysis() END SUCCESS ===");
+
             return update.getId();
 
         } catch (Exception e) {
@@ -448,25 +525,46 @@ public class PolicyService {
         }
     }
 
+    @Transactional
+    public JsonNode analyzeFromFeed(String regulationText, String sourceLink) {
+
+        if (sourceLink != null && updateRepository.existsBySourceLink(sourceLink)) {
+            logger.info("Feed item already processed: {}", sourceLink);
+            return null;
+        }
+
+        logger.info("New regulatory item detected from feed: {}", sourceLink);
+
+        String raw = analyze("", regulationText);
+
+        JsonNode parsed = safeParse(raw);
+
+        if (parsed != null && !parsed.has("error")) {
+            persistAnalysis(parsed, regulationText, sourceLink);
+        }
+
+        return parsed;
+    }
+
     // ================= SUB ENDPOINTS =================
 
     public JsonNode getRequirements(String existingPolicy, String newRegulation) {
-        return analyzeAndParse(existingPolicy, newRegulation).path("requirements");
+        return analyzeAndParse(existingPolicy, newRegulation, null).path("requirements");
     }
 
     public JsonNode getGapReport(String existingPolicy, String newRegulation) {
-        return analyzeAndParse(existingPolicy, newRegulation).path("gapReport");
+        return analyzeAndParse(existingPolicy, newRegulation, null).path("gapReport");
     }
 
     public JsonNode getPolicyDrafts(String existingPolicy, String newRegulation) {
-        return analyzeAndParse(existingPolicy, newRegulation).path("policyDrafts");
+        return analyzeAndParse(existingPolicy, newRegulation, null).path("policyDrafts");
     }
 
     public JsonNode getCodeSpecifications(String existingPolicy, String newRegulation) {
-        return analyzeAndParse(existingPolicy, newRegulation).path("codeSpecifications");
+        return analyzeAndParse(existingPolicy, newRegulation, null).path("codeSpecifications");
     }
 
     public JsonNode getSummary(String existingPolicy, String newRegulation) {
-        return analyzeAndParse(existingPolicy, newRegulation).path("summary");
+        return analyzeAndParse(existingPolicy, newRegulation, null).path("summary");
     }
 }

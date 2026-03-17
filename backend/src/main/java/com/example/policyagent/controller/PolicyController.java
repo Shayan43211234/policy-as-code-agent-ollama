@@ -52,78 +52,53 @@ public class PolicyController {
 
     @PostMapping("/analyze")
     public ResponseEntity<JsonNode> analyze(@RequestBody Map<String, String> request) {
-        return ResponseEntity.ok(
-                service.analyzeAndParse(
-                        request.get("existingPolicy"),
-                        request.get("newRegulation")));
-    }
 
-    @PostMapping("/requirements")
-    public ResponseEntity<JsonNode> requirements(@RequestBody Map<String, String> request) {
-        return ResponseEntity.ok(
-                service.getRequirements(
-                        request.get("existingPolicy"),
-                        request.get("newRegulation")));
-    }
+        String existingPolicy = request.get("existingPolicy");
+        String newRegulation = request.get("newRegulation");
+        String sourceLink = request.get("sourceLink");
 
-    @PostMapping("/gap-report")
-    public ResponseEntity<JsonNode> gapReport(@RequestBody Map<String, String> request) {
         return ResponseEntity.ok(
-                service.getGapReport(
-                        request.get("existingPolicy"),
-                        request.get("newRegulation")));
+                service.analyzeAndParse(existingPolicy, newRegulation, sourceLink));
     }
-
-    @PostMapping("/policy-drafts")
-    public ResponseEntity<JsonNode> policyDrafts(@RequestBody Map<String, String> request) {
-        return ResponseEntity.ok(
-                service.getPolicyDrafts(
-                        request.get("existingPolicy"),
-                        request.get("newRegulation")));
-    }
-
-    @PostMapping("/code-specs")
-    public ResponseEntity<JsonNode> codeSpecs(@RequestBody Map<String, String> request) {
-        return ResponseEntity.ok(
-                service.getCodeSpecifications(
-                        request.get("existingPolicy"),
-                        request.get("newRegulation")));
-    }
-
-    @PostMapping("/summary")
-    public ResponseEntity<JsonNode> summary(@RequestBody Map<String, String> request) {
-        return ResponseEntity.ok(
-                service.getSummary(
-                        request.get("existingPolicy"),
-                        request.get("newRegulation")));
-    }
-
-    // ================= RSS FEED =================
 
     @PostMapping("/fetch-feed")
     public ResponseEntity<?> fetchFeed(@RequestBody Map<String, String> request) {
+
         try {
+
             String url = request.get("url");
 
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .GET()
+                    .header("User-Agent", "PolicyAgent/1.0")
+                    .header("Accept", "application/rss+xml, application/xml, text/xml")
+                    .timeout(java.time.Duration.ofSeconds(10))
                     .build();
 
             HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+
+            if (resp.statusCode() != 200) {
+                return ResponseEntity.status(resp.statusCode())
+                        .body(Map.of(
+                                "error", "feed_fetch_failed",
+                                "message", "Feed returned status: " + resp.statusCode()));
+            }
 
             var doc = DocumentBuilderFactory.newInstance()
                     .newDocumentBuilder()
                     .parse(new java.io.ByteArrayInputStream(resp.body().getBytes()));
 
             var items = doc.getElementsByTagName("item");
+
             if (items.getLength() == 0) {
                 items = doc.getElementsByTagName("entry");
             }
 
-            List<Map<String, String>> result = new ArrayList<>();
+            List<Map<String, Object>> result = new ArrayList<>();
 
             for (int i = 0; i < items.getLength(); i++) {
+
                 var node = items.item(i);
 
                 String title = "";
@@ -131,21 +106,69 @@ public class PolicyController {
                 String desc = "";
 
                 for (int j = 0; j < node.getChildNodes().getLength(); j++) {
+
                     var c = node.getChildNodes().item(j);
                     var name = c.getNodeName().toLowerCase();
 
                     if (name.equals("title"))
                         title = c.getTextContent();
-                    if (name.equals("link"))
-                        link = c.getTextContent();
+
+                    if (name.equals("link")) {
+                        if (c.getAttributes() != null && c.getAttributes().getNamedItem("href") != null) {
+                            link = c.getAttributes().getNamedItem("href").getTextContent();
+                        } else {
+                            link = c.getTextContent();
+                        }
+                    }
+
                     if (name.equals("description") || name.equals("summary"))
                         desc = c.getTextContent();
                 }
 
-                Map<String, String> item = new HashMap<>();
+                // ================================
+                // SKIP IF ALREADY PROCESSED
+                // ================================
+
+                if (link != null && regulatoryUpdateRepository.existsBySourceLink(link)) {
+                    continue;
+                }
+
+                // ================================
+                // OPTIONAL REGULATORY FILTER
+                // ================================
+
+                String text = ((title != null ? title : "") + " " + (desc != null ? desc : "")).toLowerCase();
+
+                if (!(text.contains("regulation")
+                        || text.contains("compliance")
+                        || text.contains("risk")
+                        || text.contains("supervision")
+                        || text.contains("guidance")
+                        || text.contains("rule")
+                        || text.contains("requirement"))) {
+
+                    logger.info("Skipping non-regulatory feed item: {}", title);
+                    continue;
+                }
+
+                Map<String, Object> item = new HashMap<>();
+
                 item.put("title", title);
                 item.put("link", link);
                 item.put("description", desc);
+
+                try {
+
+                    String regulationText = title + ". " + desc;
+
+                    JsonNode analysis = service.analyzeFromFeed(regulationText, link);
+
+                    item.put("analysis", analysis);
+
+                } catch (Exception ex) {
+
+                    logger.warn("Auto analysis failed for feed item: {}", title);
+                }
 
                 result.add(item);
             }
@@ -153,6 +176,7 @@ public class PolicyController {
             return ResponseEntity.ok(result);
 
         } catch (Exception e) {
+
             return ResponseEntity.status(500)
                     .body(Map.of(
                             "error", "fetch_failed",
