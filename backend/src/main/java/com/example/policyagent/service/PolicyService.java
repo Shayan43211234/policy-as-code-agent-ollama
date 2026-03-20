@@ -52,7 +52,6 @@ public class PolicyService {
 
         logger.info("Cache MISS - calling LLM for new analysis");
 
-        // RSS duplicate protection (manual analysis allowed)
         if (sourceLink != null && updateRepository.existsBySourceLink(sourceLink)) {
 
             logger.info("Duplicate feed detected. Returning existing analysis for: {}", sourceLink);
@@ -62,22 +61,17 @@ public class PolicyService {
             if (existing != null) {
 
                 ObjectNode result = objectMapper.createObjectNode();
-
                 result.put("agentName", "Policy-as-Code Regulatory Change Agent");
                 result.put("changeDetected", true);
-
                 result.put("confidenceScore", existing.getConfidenceScore());
-
                 result.set("requirements", objectMapper.createArrayNode());
                 result.set("gapReport", objectMapper.createArrayNode());
                 result.set("policyDrafts", objectMapper.createArrayNode());
                 result.set("codeSpecifications", objectMapper.createArrayNode());
-
                 result.set("summary", objectMapper.createObjectNode());
 
                 return result;
             }
-
         }
 
         String raw = analyze(existingPolicy, newRegulation);
@@ -97,61 +91,65 @@ public class PolicyService {
         logger.info("=== analyze() START === calling LLM");
 
         String prompt = String.format("""
-                You are the Policy-as-Code Regulatory Change Agent.
+                You are the Policy-as-Code Regulatory Change Agent for a bank.
 
-                IMPORTANT:
-                - Return ONLY raw JSON.
-                - Do NOT add explanations.
-                - Do NOT use markdown.
-                - Do NOT wrap in triple backticks.
-                - Output must start with { and end with }.
-                - Be precise and deterministic.
+                CRITICAL INSTRUCTIONS:
+                - Return ONLY raw JSON. No explanations, no markdown, no triple backticks.
+                - Output MUST start with { and end with }.
+                - You MUST populate ALL arrays: requirements, gapReport, policyDrafts, codeSpecifications.
+                - NEVER return empty arrays for gapReport, policyDrafts, or codeSpecifications if there are unsatisfied requirements.
 
-                COMPARISON RULES:
-                - Carefully compare numerical values (days, amounts, thresholds).
-                - Carefully compare frequencies (e.g., 180 days vs 180 days).
-                - If the existing policy already satisfies the regulation requirement,
-                  then set:
-                      "satisfied": true
-                      "recommendation": "no_action"
-                - Only mark "satisfied": false if there is a real gap.
-                - Do NOT create artificial gaps.
-                - If values are equal, it is satisfied.
+                THE BANK:
+                Business lines: Retail Banking, Commercial Lending, Wealth Management, Treasury
+                Systems: Vendor Risk System, Core Banking Platform, AML Monitoring Engine, Payments Gateway
 
-                The bank has the following business lines:
-                - Retail Banking
-                - Commercial Lending
-                - Wealth Management
-                - Treasury
+                ANALYSIS RULES:
+                - Compare the Existing Policy against each requirement in the New Regulation.
+                - If the existing policy already satisfies a requirement, set satisfied=true, recommendation=no_action.
+                - If there is a real gap, set satisfied=false and pick the correct recommendation.
+                - Do NOT create artificial gaps. Only mark unsatisfied if there is a real difference.
 
-                The bank has the following systems:
-                - Vendor Risk System
-                - Core Banking Platform
-                - AML Monitoring Engine
-                - Payments Gateway
+                RECOMMENDATION VALUES (pick one per requirement):
+                - no_action          → already satisfied
+                - update_policy      → policy text needs to be rewritten
+                - add_control        → a new control/process must be added
+                - implement_system_rule → a system/code rule must be built
 
-                For EACH requirement:
-                - Determine if it is already satisfied by the Existing Policy.
-                - Determine which ONE business line is primarily impacted.
-                - Determine which ONE system is primarily impacted.
+                FOR EACH UNSATISFIED REQUIREMENT YOU MUST:
+                1. Add an entry to gapReport explaining exactly what is missing and why.
+                2. If recommendation=update_policy: add a DETAILED policy draft to policyDrafts (not a placeholder — write the actual new policy language).
+                3. If recommendation=implement_system_rule: add a DETAILED code specification to codeSpecifications (write the actual IF/THEN rule with real field names and values).
+                4. If recommendation=add_control: add a DETAILED entry to both gapReport and policyDrafts describing the control to add.
 
-                Return JSON exactly in this structure:
+                POLICY DRAFT FORMAT (for policyDrafts):
+                Write professional policy language, e.g.:
+                "Section 4.2 - Vendor Risk Assessment Frequency: All vendors classified as Critical or High risk shall undergo a comprehensive risk assessment no less frequently than every 180 calendar days. The Head of Vendor Risk Management is responsible for ensuring timely completion. Non-compliance shall trigger an escalation to the Chief Risk Officer within 5 business days."
+
+                CODE SPECIFICATION FORMAT (for codeSpecifications):
+                Write executable rule logic, e.g.:
+                "IF vendor_risk_tier IN ('critical', 'high') AND (current_date - last_assessment_date) > 180 THEN trigger_alert(vendor_id, 'ASSESSMENT_OVERDUE'); SET vendor_status = 'REVIEW_REQUIRED'; NOTIFY(risk_manager, compliance_officer);"
+
+                GAP REPORT FORMAT (for gapReport):
+                Write a clear business explanation, e.g.:
+                "Issue: Review frequency mismatch. Current policy mandates assessment every 365 days, but regulation requires every 180 days for critical vendors. This creates a 185-day compliance gap that exposes the bank to regulatory risk."
+
+                Return JSON in EXACTLY this structure:
 
                 {
                   "agentName": "Policy-as-Code Regulatory Change Agent",
                   "changeDetected": true,
-                  "confidenceScore": 0.0,
+                  "confidenceScore": 0.85,
                   "requirements": [
                     {
                       "id": 1,
-                      "text": "",
+                      "text": "exact requirement text here",
                       "type": "policy|control|system",
-                      "tests": [],
+                      "tests": ["field_name operator value"],
                       "satisfied": false,
-                      "rationale": "",
+                      "rationale": "specific explanation of why satisfied or not",
                       "recommendation": "no_action|update_policy|add_control|implement_system_rule",
-                      "impactedBusinessLine": "",
-                      "impactedSystem": ""
+                      "impactedBusinessLine": "one of the four business lines",
+                      "impactedSystem": "one of the four systems"
                     }
                   ],
                   "summary": {
@@ -161,9 +159,25 @@ public class PolicyService {
                     "newControlsNeeded": 0,
                     "systemImplementationsNeeded": 0
                   },
-                  "gapReport": [],
-                  "policyDrafts": [],
-                  "codeSpecifications": []
+                  "gapReport": [
+                    {
+                      "requirementId": 1,
+                      "issue": "short issue title",
+                      "detail": "detailed explanation of the gap and its business impact"
+                    }
+                  ],
+                  "policyDrafts": [
+                    {
+                      "requirementId": 1,
+                      "draft": "full professional policy language here"
+                    }
+                  ],
+                  "codeSpecifications": [
+                    {
+                      "requirementId": 1,
+                      "spec": "IF condition THEN action; full executable rule logic here"
+                    }
+                  ]
                 }
 
                 Existing Policy:
@@ -188,51 +202,42 @@ public class PolicyService {
                 json.length() > 300 ? json.substring(0, 300) + "..." : json);
 
         try {
-            // Defensive: strip markdown code fences if present
             String cleanJson = json;
+
             if (cleanJson.contains("```json")) {
-                logger.info("Detected markdown code fence in response - extracting pure JSON");
-                int start = cleanJson.indexOf("```json") + 7; // length of "```json"
+                logger.info("Detected markdown code fence - extracting pure JSON");
+                int start = cleanJson.indexOf("```json") + 7;
                 int end = cleanJson.indexOf("```", start);
                 if (end > start) {
                     cleanJson = cleanJson.substring(start, end).trim();
-                    logger.debug("Extracted JSON from markdown, length: {}", cleanJson.length());
                 }
             } else if (cleanJson.contains("```")) {
-                logger.info("Detected generic code fence in response - extracting pure JSON");
                 int start = cleanJson.indexOf("```") + 3;
                 int end = cleanJson.indexOf("```", start);
                 if (end > start) {
                     cleanJson = cleanJson.substring(start, end).trim();
-                    logger.debug("Extracted JSON from generic fence, length: {}", cleanJson.length());
                 }
             }
 
-            // Find first { and last } to ensure we parse valid JSON
             int jsonStart = cleanJson.indexOf('{');
             int jsonEnd = cleanJson.lastIndexOf('}');
             if (jsonStart >= 0 && jsonEnd > jsonStart) {
                 cleanJson = cleanJson.substring(jsonStart, jsonEnd + 1);
-                logger.debug("Extracted JSON bounds from {} to }, length: {}", jsonStart, cleanJson.length());
             }
 
             JsonNode parsed = objectMapper.readTree(cleanJson);
             logger.info("JSON parsing succeeded - root has {} fields", parsed.size());
-            logger.debug("Parsed JSON keys: {}", (Iterable<String>) () -> parsed.fieldNames());
             logger.info("=== safeParse() END - SUCCESS ===");
             return parsed;
 
         } catch (Exception e) {
-            logger.error("JSON parsing FAILED - Exception: {} - Message: {}",
-                    e.getClass().getSimpleName(), e.getMessage());
-            logger.debug("Stack trace: ", e);
+            logger.error("JSON parsing FAILED: {}", e.getMessage());
 
             ObjectNode err = objectMapper.createObjectNode();
             err.put("error", "failed_to_parse_response");
             err.put("message", e.getMessage());
             err.put("originalLength", json.length());
 
-            logger.info("=== safeParse() END - ERROR OBJECT CREATED ===");
             return err;
         }
     }
@@ -255,10 +260,7 @@ public class PolicyService {
 
         try {
 
-            // ==========================
             // 1. SAVE REGULATORY UPDATE
-            // ==========================
-
             RegulatoryUpdate update = new RegulatoryUpdate();
 
             if (sourceLink != null) {
@@ -276,13 +278,9 @@ public class PolicyService {
             update.setConfidenceScore(root.path("confidenceScore").asDouble(0.75));
 
             update = updateRepository.save(update);
-
             logger.info("RegulatoryUpdate saved with ID: {}", update.getId());
 
-            // ==========================
             // 2. SAVE REQUIREMENTS
-            // ==========================
-
             JsonNode requirementsNode = root.path("requirements");
             JsonNode gapReportNode = root.path("gapReport");
             JsonNode draftsNode = root.path("policyDrafts");
@@ -308,33 +306,23 @@ public class PolicyService {
 
                     req.setImpactedBusinessLine(
                             impactedBusinessLine != null && !impactedBusinessLine.isBlank()
-                                    ? impactedBusinessLine
-                                    : "Unknown");
+                                    ? impactedBusinessLine : "Unknown");
 
                     req.setImpactedSystem(
                             impactedSystem != null && !impactedSystem.isBlank()
-                                    ? impactedSystem
-                                    : "Unknown");
+                                    ? impactedSystem : "Unknown");
 
                     req = requirementRepository.save(req);
-
-                    // expose DB id to frontend
                     ((ObjectNode) r).put("dbId", req.getId());
-
                     reqCount++;
 
                     logger.info("Requirement saved ID: {}", req.getId());
 
                     boolean gapCreatedFromLLM = false;
 
-                    // ==========================
-                    // 3. GAP HANDLING
-                    // ==========================
-
+                    // 3. GAP HANDLING — prefer LLM response, fallback only if missing
                     if (gapReportNode.isArray()) {
-
                         for (JsonNode g : gapReportNode) {
-
                             if (g.path("requirementId").asLong() == r.path("id").asLong()) {
 
                                 GapEntity gap = new GapEntity();
@@ -343,14 +331,12 @@ public class PolicyService {
                                 gap.setDetail(g.path("detail").asText("Gap detected based on LLM analysis."));
 
                                 gapRepository.save(gap);
-
                                 gapCreatedFromLLM = true;
 
                                 ObjectNode gapJson = objectMapper.createObjectNode();
                                 gapJson.put("requirementId", req.getId());
                                 gapJson.put("issue", gap.getIssue());
                                 gapJson.put("detail", gap.getDetail());
-
                                 gapArray.add(gapJson);
 
                                 logger.info("Gap saved from LLM for requirement ID: {}", req.getId());
@@ -358,15 +344,13 @@ public class PolicyService {
                         }
                     }
 
-                    // Backend enforced gap
+                    // Fallback only if LLM did not provide a gap for an unsatisfied requirement
                     if (!req.getSatisfied() && !gapCreatedFromLLM) {
-
                         GapEntity autoGap = new GapEntity();
                         autoGap.setRequirementId(req.getId());
-                        autoGap.setIssue("Requirement not satisfied");
-                        autoGap.setDetail(
-                                "Backend-enforced gap: Requirement marked as unsatisfied but no gap was provided by LLM. "
-                                        + "Recommendation: " + req.getRecommendation());
+                        autoGap.setIssue("Compliance gap detected");
+                        autoGap.setDetail("This requirement is not satisfied by the current policy. " +
+                                "Action required: " + req.getRecommendation().replace("_", " "));
 
                         gapRepository.save(autoGap);
 
@@ -374,24 +358,19 @@ public class PolicyService {
                         gapJson.put("requirementId", req.getId());
                         gapJson.put("issue", autoGap.getIssue());
                         gapJson.put("detail", autoGap.getDetail());
-
                         gapArray.add(gapJson);
 
-                        logger.info("Auto-generated gap for requirement ID: {}", req.getId());
+                        logger.info("Fallback gap created for requirement ID: {}", req.getId());
                     }
 
-                    // ==========================
-                    // 4. POLICY DRAFT
-                    // ==========================
-
-                    if ("update_policy".equalsIgnoreCase(req.getRecommendation())) {
+                    // 4. POLICY DRAFT — prefer LLM, fallback only if missing
+                    if ("update_policy".equalsIgnoreCase(req.getRecommendation())
+                            || "add_control".equalsIgnoreCase(req.getRecommendation())) {
 
                         boolean draftCreated = false;
 
                         if (draftsNode.isArray()) {
-
                             for (JsonNode d : draftsNode) {
-
                                 if (d.path("requirementId").asLong() == r.path("id").asLong()) {
 
                                     PolicyDraftEntity draft = new PolicyDraftEntity();
@@ -399,13 +378,11 @@ public class PolicyService {
                                     draft.setDraft(d.path("draft").asText());
 
                                     policyDraftRepository.save(draft);
-
                                     draftCreated = true;
 
                                     ObjectNode draftJson = objectMapper.createObjectNode();
                                     draftJson.put("requirementId", req.getId());
                                     draftJson.put("draft", draft.getDraft());
-
                                     draftArray.add(draftJson);
 
                                     logger.info("Policy draft saved from LLM for requirement ID: {}", req.getId());
@@ -414,37 +391,29 @@ public class PolicyService {
                         }
 
                         if (!draftCreated) {
-
                             PolicyDraftEntity autoDraft = new PolicyDraftEntity();
                             autoDraft.setRequirementId(req.getId());
-                            autoDraft.setDraft(
-                                    "Auto-generated draft: Update policy to comply with requirement: "
-                                            + req.getText());
+                            autoDraft.setDraft("Policy update required: " + req.getText() +
+                                    " — Please have your compliance team draft the updated policy language.");
 
                             policyDraftRepository.save(autoDraft);
 
                             ObjectNode draftJson = objectMapper.createObjectNode();
                             draftJson.put("requirementId", req.getId());
                             draftJson.put("draft", autoDraft.getDraft());
-
                             draftArray.add(draftJson);
 
-                            logger.info("Auto-generated policy draft for requirement ID: {}", req.getId());
+                            logger.info("Fallback policy draft for requirement ID: {}", req.getId());
                         }
                     }
 
-                    // ==========================
-                    // 5. CODE SPEC
-                    // ==========================
-
+                    // 5. CODE SPEC — prefer LLM, fallback only if missing
                     if ("implement_system_rule".equalsIgnoreCase(req.getRecommendation())) {
 
                         boolean specCreated = false;
 
                         if (specsNode.isArray()) {
-
                             for (JsonNode s : specsNode) {
-
                                 if (s.path("requirementId").asLong() == r.path("id").asLong()) {
 
                                     CodeSpecificationEntity spec = new CodeSpecificationEntity();
@@ -452,13 +421,11 @@ public class PolicyService {
                                     spec.setSpecification(s.path("spec").asText());
 
                                     codeSpecificationRepository.save(spec);
-
                                     specCreated = true;
 
                                     ObjectNode specJson = objectMapper.createObjectNode();
                                     specJson.put("requirementId", req.getId());
                                     specJson.put("spec", spec.getSpecification());
-
                                     specArray.add(specJson);
 
                                     logger.info("Code spec saved from LLM for requirement ID: {}", req.getId());
@@ -467,54 +434,42 @@ public class PolicyService {
                         }
 
                         if (!specCreated) {
-
                             CodeSpecificationEntity autoSpec = new CodeSpecificationEntity();
                             autoSpec.setRequirementId(req.getId());
                             autoSpec.setSpecification(
-                                    "Auto-generated system rule: IF condition related to '"
-                                            + req.getText()
-                                            + "' THEN enforce compliance.");
+                                    "// System rule required for: " + req.getText() + "\n" +
+                                    "// Please implement the appropriate system logic.");
 
                             codeSpecificationRepository.save(autoSpec);
 
                             ObjectNode specJson = objectMapper.createObjectNode();
                             specJson.put("requirementId", req.getId());
                             specJson.put("spec", autoSpec.getSpecification());
-
                             specArray.add(specJson);
 
-                            logger.info("Auto-generated code specification for requirement ID: {}", req.getId());
+                            logger.info("Fallback code spec for requirement ID: {}", req.getId());
                         }
                     }
                 }
             }
 
-            // ==========================
             // ATTACH DB DATA TO RESPONSE
-            // ==========================
-
             ((ObjectNode) root).set("gapReport", gapArray);
             ((ObjectNode) root).set("policyDrafts", draftArray);
             ((ObjectNode) root).set("codeSpecifications", specArray);
 
-            // ==========================
             // 6. AUDIT LOG
-            // ==========================
-
             AuditLog log = new AuditLog();
             log.setAction("ANALYSIS_COMPLETED");
             log.setActor("SYSTEM");
             log.setDetails("Analysis persisted with " + reqCount + " requirements");
             log.setTimestamp(Instant.now());
-
             auditRepository.save(log);
 
             logger.info("=== persistAnalysis() END SUCCESS ===");
-
             return update.getId();
 
         } catch (Exception e) {
-
             logger.error("persistAnalysis() FAILED", e);
             throw new RuntimeException("Failed to persist regulatory analysis", e);
         }
@@ -531,7 +486,6 @@ public class PolicyService {
         logger.info("New regulatory item detected from feed: {}", sourceLink);
 
         String raw = analyze("", regulationText);
-
         JsonNode parsed = safeParse(raw);
 
         if (parsed != null && !parsed.has("error")) {
