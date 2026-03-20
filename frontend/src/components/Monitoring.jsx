@@ -123,13 +123,13 @@ import React, { useState, useEffect, useRef } from 'react'
           Fetch Now
         </button>
 
-        {/* <button
+        <button
           className="btn primary"
           onClick={() => startPolling()}
           disabled={loading}
         >
           {polling ? "Polling Active (2m)" : "Start Polling (2m)"}
-        </button> */}
+        </button>
 
         <button
           className="btn"

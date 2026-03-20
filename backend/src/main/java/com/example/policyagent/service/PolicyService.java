@@ -6,8 +6,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.springframework.ai.chat.ChatClient;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.slf4j.Logger;
@@ -20,7 +18,7 @@ public class PolicyService {
 
     private static final Logger logger = LoggerFactory.getLogger(PolicyService.class);
 
-    private final ChatClient chatClient;
+    private final GroqChatService chatClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final RegulatoryUpdateRepository updateRepository;
@@ -30,7 +28,7 @@ public class PolicyService {
     private final PolicyDraftRepository policyDraftRepository;
     private final CodeSpecificationRepository codeSpecificationRepository;
 
-    public PolicyService(ChatClient chatClient,
+    public PolicyService(GroqChatService chatClient,
             RegulatoryUpdateRepository updateRepository,
             RequirementRepository requirementRepository,
             GapRepository gapRepository,
@@ -175,10 +173,7 @@ public class PolicyService {
                 %s
                 """, existingPolicy, newRegulation);
 
-        String raw = chatClient.call(new Prompt(prompt))
-                .getResult()
-                .getOutput()
-                .getContent();
+        String raw = chatClient.chat(prompt);
 
         logger.debug("Raw LLM response (first 500 chars): {}",
                 raw.length() > 500 ? raw.substring(0, 500) + "..." : raw);
