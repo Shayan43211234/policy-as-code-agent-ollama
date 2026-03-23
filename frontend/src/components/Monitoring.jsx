@@ -109,13 +109,13 @@ export default function Monitoring({
         <button className="btn" onClick={fetchFeeds} disabled={loading || !feeds.length}>
           {loading ? '⏳ Fetching...' : '↻ Fetch Now'}
         </button>
-        <button
+        {/* <button
           className={`btn ${polling ? 'danger' : 'primary'}`}
           onClick={polling ? stopPolling : startPolling}
           disabled={loading}
         >
           {polling ? '⏹ Stop Polling' : '▶ Start Polling (2m)'}
-        </button>
+        </button> */}
         <button
           className="btn"
           onClick={() => { setFeeds([]); setItems([]) }}

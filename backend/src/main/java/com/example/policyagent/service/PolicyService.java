@@ -28,6 +28,60 @@ public class PolicyService {
     private final PolicyDraftRepository policyDraftRepository;
     private final CodeSpecificationRepository codeSpecificationRepository;
 
+    // ===============================================================
+    // BASE BANK POLICY CONTEXT
+    // Used when analyzing feed items (no user-supplied existing policy).
+    // Represents a typical mid-size bank's current policy baseline.
+    // ===============================================================
+    private static final String BASE_BANK_POLICY = """
+            BANK BASELINE POLICY FRAMEWORK (Current State):
+
+            1. VENDOR / THIRD-PARTY RISK
+               - vendorRiskPolicy: enabled
+               - reviewFrequencyDays: 365
+               - vendorRiskTiering: basic (low / high only)
+               - continuousMonitoring: disabled
+               - automatedAlerts: disabled
+               - loggingEnabled: false
+
+            2. CAPITAL & LIQUIDITY
+               - capitalAdequacyPolicy: Basel II compliant
+               - liquidityCoverageRatio: monitored quarterly
+               - stressTestingFrequency: annual
+               - tokenizedSecuritiesPolicy: not addressed
+
+            3. AML / BSA / KYC
+               - amlPolicy: enabled
+               - kycVerification: manual process
+               - suspiciousActivityReporting: enabled
+               - sanctionsScreening: daily batch
+               - transactionMonitoringThreshold: $10,000
+
+            4. CONSUMER PROTECTION
+               - reputationRiskPolicy: included in supervisory framework
+               - consumerComplaintsProcess: manual review
+               - fairLendingPolicy: enabled
+
+            5. ENFORCEMENT & GOVERNANCE
+               - enforcementActionTracking: manual
+               - boardReportingFrequency: quarterly
+               - chiefComplianceOfficer: designated
+               - regulatoryChangeManagement: manual process, no automation
+
+            6. MONETARY POLICY COMPLIANCE
+               - fomcGuidanceTracking: manual
+               - interestRateRiskPolicy: enabled
+               - discountRateMonitoring: monthly review
+            """;
+
+    // Routing assignments by recommendation type
+    private static final java.util.Map<String, String> ROUTING_MAP = java.util.Map.of(
+            "update_policy", "COMPLIANCE TEAM",
+            "add_control", "COMPLIANCE TEAM",
+            "implement_system_rule", "TECHNOLOGY TEAM",
+            "no_action", "NO ROUTING REQUIRED"
+    );
+
     public PolicyService(GroqChatService chatClient,
             RegulatoryUpdateRepository updateRepository,
             RequirementRepository requirementRepository,
@@ -53,13 +107,9 @@ public class PolicyService {
         logger.info("Cache MISS - calling LLM for new analysis");
 
         if (sourceLink != null && updateRepository.existsBySourceLink(sourceLink)) {
-
             logger.info("Duplicate feed detected. Returning existing analysis for: {}", sourceLink);
-
             RegulatoryUpdate existing = updateRepository.findBySourceLink(sourceLink).orElse(null);
-
             if (existing != null) {
-
                 ObjectNode result = objectMapper.createObjectNode();
                 result.put("agentName", "Policy-as-Code Regulatory Change Agent");
                 result.put("changeDetected", true);
@@ -69,7 +119,6 @@ public class PolicyService {
                 result.set("policyDrafts", objectMapper.createArrayNode());
                 result.set("codeSpecifications", objectMapper.createArrayNode());
                 result.set("summary", objectMapper.createObjectNode());
-
                 return result;
             }
         }
@@ -90,6 +139,11 @@ public class PolicyService {
     public String analyze(String existingPolicy, String newRegulation) {
         logger.info("=== analyze() START === calling LLM");
 
+        // Use base bank policy if no existing policy is provided (e.g. from feed)
+        String policyContext = (existingPolicy == null || existingPolicy.isBlank())
+                ? BASE_BANK_POLICY
+                : existingPolicy;
+
         String prompt = String.format("""
                 You are the Policy-as-Code Regulatory Change Agent for a bank.
 
@@ -104,50 +158,65 @@ public class PolicyService {
                 Systems: Vendor Risk System, Core Banking Platform, AML Monitoring Engine, Payments Gateway
 
                 ANALYSIS RULES:
-                - Compare the Existing Policy against each requirement in the New Regulation.
+                - Carefully compare the Existing Policy against each requirement in the New Regulation.
                 - If the existing policy already satisfies a requirement, set satisfied=true, recommendation=no_action.
                 - If there is a real gap, set satisfied=false and pick the correct recommendation.
                 - Do NOT create artificial gaps. Only mark unsatisfied if there is a real difference.
+                - Be realistic: many requirements may already be satisfied by the existing policy.
 
                 RECOMMENDATION VALUES (pick one per requirement):
-                - no_action          → already satisfied
-                - update_policy      → policy text needs to be rewritten
-                - add_control        → a new control/process must be added
-                - implement_system_rule → a system/code rule must be built
+                - no_action              → already satisfied by existing policy
+                - update_policy          → policy text needs to be updated (routes to COMPLIANCE TEAM)
+                - add_control            → a new control/process must be added (routes to COMPLIANCE TEAM)
+                - implement_system_rule  → a system/code rule must be built (routes to TECHNOLOGY TEAM)
 
                 FOR EACH UNSATISFIED REQUIREMENT YOU MUST:
-                1. Add an entry to gapReport explaining exactly what is missing and why.
-                2. If recommendation=update_policy: add a DETAILED policy draft to policyDrafts (not a placeholder — write the actual new policy language).
-                3. If recommendation=implement_system_rule: add a DETAILED code specification to codeSpecifications (write the actual IF/THEN rule with real field names and values).
-                4. If recommendation=add_control: add a DETAILED entry to both gapReport and policyDrafts describing the control to add.
+                1. Add an entry to gapReport with a clear business explanation of what is missing.
+                2. If recommendation=update_policy OR add_control: add a DETAILED policy draft to policyDrafts.
+                   - Write real professional policy language with section numbers, responsible officers, timelines.
+                   - Example: "Section 4.2 - Vendor Risk Assessment Frequency: All vendors classified as Critical
+                     or High risk shall undergo a comprehensive risk assessment no less frequently than every 180
+                     calendar days. The Head of Vendor Risk Management is responsible for ensuring timely
+                     completion. Non-compliance shall trigger escalation to the Chief Risk Officer within 5 business days."
+                3. If recommendation=implement_system_rule: add a DETAILED code specification to codeSpecifications.
+                   - Write real executable IF/THEN rule logic with actual field names and values.
+                   - Example: "IF vendor_risk_tier IN ('critical', 'high') AND (current_date - last_assessment_date) > 180
+                     THEN trigger_assessment_review(vendor_id); SET vendor_status = 'REVIEW_REQUIRED';
+                     NOTIFY(risk_manager, compliance_officer);"
 
-                POLICY DRAFT FORMAT (for policyDrafts):
-                Write professional policy language, e.g.:
-                "Section 4.2 - Vendor Risk Assessment Frequency: All vendors classified as Critical or High risk shall undergo a comprehensive risk assessment no less frequently than every 180 calendar days. The Head of Vendor Risk Management is responsible for ensuring timely completion. Non-compliance shall trigger an escalation to the Chief Risk Officer within 5 business days."
+                GAP REPORT FORMAT:
+                - issue: short descriptive title of the gap
+                - detail: explain what the current policy says vs what the regulation requires, and the business impact.
 
-                CODE SPECIFICATION FORMAT (for codeSpecifications):
-                Write executable rule logic, e.g.:
-                "IF vendor_risk_tier IN ('critical', 'high') AND (current_date - last_assessment_date) > 180 THEN trigger_alert(vendor_id, 'ASSESSMENT_OVERDUE'); SET vendor_status = 'REVIEW_REQUIRED'; NOTIFY(risk_manager, compliance_officer);"
-
-                GAP REPORT FORMAT (for gapReport):
-                Write a clear business explanation, e.g.:
-                "Issue: Review frequency mismatch. Current policy mandates assessment every 365 days, but regulation requires every 180 days for critical vendors. This creates a 185-day compliance gap that exposes the bank to regulatory risk."
+                CONFIDENCE SCORE RULES (calculate a value between 0.50 and 1.0, do NOT hardcode):
+                - Start at 1.0 and deduct based on the following:
+                - Deduct 0.05 for each requirement where the rationale is uncertain or ambiguous
+                - Deduct 0.10 if the existing policy text is vague, incomplete, or missing key details
+                - Deduct 0.10 if the regulation text itself is ambiguous or lacks specific thresholds
+                - Deduct 0.05 for each requirement marked satisfied where the evidence is weak or inferred
+                - Deduct 0.05 if the regulation only partially overlaps with the bank's business lines
+                - Minimum score is 0.50 regardless of deductions
+                - A clear, specific regulation vs a detailed existing policy should score 0.85-0.95
+                - A vague regulation vs an incomplete policy should score 0.50-0.65
+                - A moderate regulation with some gaps should score 0.65-0.80
+                - ALWAYS calculate and return a unique score — never default to 0.85
 
                 Return JSON in EXACTLY this structure:
 
                 {
                   "agentName": "Policy-as-Code Regulatory Change Agent",
                   "changeDetected": true,
-                  "confidenceScore": 0.85,
+                  "confidenceScore": 0.0,
                   "requirements": [
                     {
                       "id": 1,
-                      "text": "exact requirement text here",
+                      "text": "exact requirement text",
                       "type": "policy|control|system",
                       "tests": ["field_name operator value"],
                       "satisfied": false,
-                      "rationale": "specific explanation of why satisfied or not",
+                      "rationale": "specific explanation comparing existing policy to this requirement",
                       "recommendation": "no_action|update_policy|add_control|implement_system_rule",
+                      "routingTeam": "COMPLIANCE TEAM|TECHNOLOGY TEAM|NO ROUTING REQUIRED",
                       "impactedBusinessLine": "one of the four business lines",
                       "impactedSystem": "one of the four systems"
                     }
@@ -163,19 +232,19 @@ public class PolicyService {
                     {
                       "requirementId": 1,
                       "issue": "short issue title",
-                      "detail": "detailed explanation of the gap and its business impact"
+                      "detail": "current policy says X, regulation requires Y — business impact explanation"
                     }
                   ],
                   "policyDrafts": [
                     {
                       "requirementId": 1,
-                      "draft": "full professional policy language here"
+                      "draft": "full professional policy language with section numbers and responsible officers"
                     }
                   ],
                   "codeSpecifications": [
                     {
                       "requirementId": 1,
-                      "spec": "IF condition THEN action; full executable rule logic here"
+                      "spec": "IF condition THEN action; full executable rule logic with real field names"
                     }
                   ]
                 }
@@ -185,38 +254,31 @@ public class PolicyService {
 
                 New Regulation:
                 %s
-                """, existingPolicy, newRegulation);
+                """, policyContext, newRegulation);
+        
 
         String raw = chatClient.chat(prompt);
 
         logger.debug("Raw LLM response (first 500 chars): {}",
                 raw.length() > 500 ? raw.substring(0, 500) + "..." : raw);
-
         logger.info("=== analyze() END === response length: {}", raw.length());
         return raw;
     }
 
     private JsonNode safeParse(String json) {
         logger.info("=== safeParse() START ===");
-        logger.debug("Raw JSON input (first 300 chars): {}",
-                json.length() > 300 ? json.substring(0, 300) + "..." : json);
 
         try {
             String cleanJson = json;
 
             if (cleanJson.contains("```json")) {
-                logger.info("Detected markdown code fence - extracting pure JSON");
                 int start = cleanJson.indexOf("```json") + 7;
                 int end = cleanJson.indexOf("```", start);
-                if (end > start) {
-                    cleanJson = cleanJson.substring(start, end).trim();
-                }
+                if (end > start) cleanJson = cleanJson.substring(start, end).trim();
             } else if (cleanJson.contains("```")) {
                 int start = cleanJson.indexOf("```") + 3;
                 int end = cleanJson.indexOf("```", start);
-                if (end > start) {
-                    cleanJson = cleanJson.substring(start, end).trim();
-                }
+                if (end > start) cleanJson = cleanJson.substring(start, end).trim();
             }
 
             int jsonStart = cleanJson.indexOf('{');
@@ -232,12 +294,10 @@ public class PolicyService {
 
         } catch (Exception e) {
             logger.error("JSON parsing FAILED: {}", e.getMessage());
-
             ObjectNode err = objectMapper.createObjectNode();
             err.put("error", "failed_to_parse_response");
             err.put("message", e.getMessage());
             err.put("originalLength", json.length());
-
             return err;
         }
     }
@@ -262,7 +322,6 @@ public class PolicyService {
 
             // 1. SAVE REGULATORY UPDATE
             RegulatoryUpdate update = new RegulatoryUpdate();
-
             if (sourceLink != null) {
                 update.setTitle("Regulatory Feed");
                 update.setAuthority("External Feed");
@@ -271,12 +330,10 @@ public class PolicyService {
                 update.setTitle("Manual Submission");
                 update.setAuthority("Manual Input");
             }
-
             update.setFullText(regulationText);
             update.setStatus(RegulatoryStatus.ANALYZED);
             update.setPublicationDate(Instant.now());
             update.setConfidenceScore(root.path("confidenceScore").asDouble(0.75));
-
             update = updateRepository.save(update);
             logger.info("RegulatoryUpdate saved with ID: {}", update.getId());
 
@@ -307,20 +364,24 @@ public class PolicyService {
                     req.setImpactedBusinessLine(
                             impactedBusinessLine != null && !impactedBusinessLine.isBlank()
                                     ? impactedBusinessLine : "Unknown");
-
                     req.setImpactedSystem(
                             impactedSystem != null && !impactedSystem.isBlank()
                                     ? impactedSystem : "Unknown");
 
                     req = requirementRepository.save(req);
                     ((ObjectNode) r).put("dbId", req.getId());
-                    reqCount++;
 
-                    logger.info("Requirement saved ID: {}", req.getId());
+                    // Add routing team to the response node
+                    String routingTeam = r.path("routingTeam").asText(
+                            ROUTING_MAP.getOrDefault(recommendation, "COMPLIANCE TEAM"));
+                    ((ObjectNode) r).put("routingTeam", routingTeam);
+
+                    reqCount++;
+                    logger.info("Requirement saved ID: {} | routing: {}", req.getId(), routingTeam);
 
                     boolean gapCreatedFromLLM = false;
 
-                    // 3. GAP HANDLING — prefer LLM response, fallback only if missing
+                    // 3. GAP HANDLING — prefer LLM, fallback if missing
                     if (gapReportNode.isArray()) {
                         for (JsonNode g : gapReportNode) {
                             if (g.path("requirementId").asLong() == r.path("id").asLong()) {
@@ -329,7 +390,6 @@ public class PolicyService {
                                 gap.setRequirementId(req.getId());
                                 gap.setIssue(g.path("issue").asText("Regulatory gap identified"));
                                 gap.setDetail(g.path("detail").asText("Gap detected based on LLM analysis."));
-
                                 gapRepository.save(gap);
                                 gapCreatedFromLLM = true;
 
@@ -344,14 +404,14 @@ public class PolicyService {
                         }
                     }
 
-                    // Fallback only if LLM did not provide a gap for an unsatisfied requirement
+                    // Fallback gap only if LLM didn't provide one
                     if (!req.getSatisfied() && !gapCreatedFromLLM) {
                         GapEntity autoGap = new GapEntity();
                         autoGap.setRequirementId(req.getId());
                         autoGap.setIssue("Compliance gap detected");
                         autoGap.setDetail("This requirement is not satisfied by the current policy. " +
-                                "Action required: " + req.getRecommendation().replace("_", " "));
-
+                                "Action required: " + req.getRecommendation().replace("_", " ") +
+                                ". Route to: " + ROUTING_MAP.getOrDefault(req.getRecommendation(), "COMPLIANCE TEAM"));
                         gapRepository.save(autoGap);
 
                         ObjectNode gapJson = objectMapper.createObjectNode();
@@ -363,7 +423,7 @@ public class PolicyService {
                         logger.info("Fallback gap created for requirement ID: {}", req.getId());
                     }
 
-                    // 4. POLICY DRAFT — prefer LLM, fallback only if missing
+                    // 4. POLICY DRAFT — for update_policy and add_control
                     if ("update_policy".equalsIgnoreCase(req.getRecommendation())
                             || "add_control".equalsIgnoreCase(req.getRecommendation())) {
 
@@ -372,17 +432,16 @@ public class PolicyService {
                         if (draftsNode.isArray()) {
                             for (JsonNode d : draftsNode) {
                                 if (d.path("requirementId").asLong() == r.path("id").asLong()) {
-
                                     PolicyDraftEntity draft = new PolicyDraftEntity();
                                     draft.setRequirementId(req.getId());
                                     draft.setDraft(d.path("draft").asText());
-
                                     policyDraftRepository.save(draft);
                                     draftCreated = true;
 
                                     ObjectNode draftJson = objectMapper.createObjectNode();
                                     draftJson.put("requirementId", req.getId());
                                     draftJson.put("draft", draft.getDraft());
+                                    draftJson.put("routingTeam", "COMPLIANCE TEAM");
                                     draftArray.add(draftJson);
 
                                     logger.info("Policy draft saved from LLM for requirement ID: {}", req.getId());
@@ -393,21 +452,22 @@ public class PolicyService {
                         if (!draftCreated) {
                             PolicyDraftEntity autoDraft = new PolicyDraftEntity();
                             autoDraft.setRequirementId(req.getId());
-                            autoDraft.setDraft("Policy update required: " + req.getText() +
-                                    " — Please have your compliance team draft the updated policy language.");
-
+                            autoDraft.setDraft("Policy update required for: " + req.getText() +
+                                    "\n\nPlease have your Compliance Team draft the updated policy language. " +
+                                    "Routing: COMPLIANCE TEAM.");
                             policyDraftRepository.save(autoDraft);
 
                             ObjectNode draftJson = objectMapper.createObjectNode();
                             draftJson.put("requirementId", req.getId());
                             draftJson.put("draft", autoDraft.getDraft());
+                            draftJson.put("routingTeam", "COMPLIANCE TEAM");
                             draftArray.add(draftJson);
 
                             logger.info("Fallback policy draft for requirement ID: {}", req.getId());
                         }
                     }
 
-                    // 5. CODE SPEC — prefer LLM, fallback only if missing
+                    // 5. CODE SPEC — for implement_system_rule
                     if ("implement_system_rule".equalsIgnoreCase(req.getRecommendation())) {
 
                         boolean specCreated = false;
@@ -415,17 +475,16 @@ public class PolicyService {
                         if (specsNode.isArray()) {
                             for (JsonNode s : specsNode) {
                                 if (s.path("requirementId").asLong() == r.path("id").asLong()) {
-
                                     CodeSpecificationEntity spec = new CodeSpecificationEntity();
                                     spec.setRequirementId(req.getId());
                                     spec.setSpecification(s.path("spec").asText());
-
                                     codeSpecificationRepository.save(spec);
                                     specCreated = true;
 
                                     ObjectNode specJson = objectMapper.createObjectNode();
                                     specJson.put("requirementId", req.getId());
                                     specJson.put("spec", spec.getSpecification());
+                                    specJson.put("routingTeam", "TECHNOLOGY TEAM");
                                     specArray.add(specJson);
 
                                     logger.info("Code spec saved from LLM for requirement ID: {}", req.getId());
@@ -438,13 +497,14 @@ public class PolicyService {
                             autoSpec.setRequirementId(req.getId());
                             autoSpec.setSpecification(
                                     "// System rule required for: " + req.getText() + "\n" +
+                                    "// Route to: TECHNOLOGY TEAM\n" +
                                     "// Please implement the appropriate system logic.");
-
                             codeSpecificationRepository.save(autoSpec);
 
                             ObjectNode specJson = objectMapper.createObjectNode();
                             specJson.put("requirementId", req.getId());
                             specJson.put("spec", autoSpec.getSpecification());
+                            specJson.put("routingTeam", "TECHNOLOGY TEAM");
                             specArray.add(specJson);
 
                             logger.info("Fallback code spec for requirement ID: {}", req.getId());
@@ -485,6 +545,7 @@ public class PolicyService {
 
         logger.info("New regulatory item detected from feed: {}", sourceLink);
 
+        // Feed items always use base bank policy as the existing policy context
         String raw = analyze("", regulationText);
         JsonNode parsed = safeParse(raw);
 

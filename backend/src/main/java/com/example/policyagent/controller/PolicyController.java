@@ -2,13 +2,16 @@ package com.example.policyagent.controller;
 
 import com.example.policyagent.entity.RegulatoryStatus;
 import com.example.policyagent.repository.RegulatoryUpdateRepository;
+import com.example.policyagent.repository.RequirementRepository;
 import com.example.policyagent.service.PolicyService;
 import com.example.policyagent.service.RegulatoryWorkflowService;
 import com.example.policyagent.service.TicketService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -25,11 +28,18 @@ import java.util.*;
 @CrossOrigin
 public class PolicyController {
 
+    @Value("${groq.feed-delay-ms:10000}")
+    private long feedDelayMs;
+
+    @Value("${groq.feed-max-items:20}")
+    private int feedMaxItems;
+
     private static final Logger logger = LoggerFactory.getLogger(PolicyController.class);
 
     private final PolicyService service;
     private final TicketService ticketService;
     private final RegulatoryUpdateRepository regulatoryUpdateRepository;
+    private final RequirementRepository requirementRepository;
     private final RegulatoryWorkflowService workflowService;
     private final ObjectMapper objectMapper;
 
@@ -39,11 +49,13 @@ public class PolicyController {
             PolicyService service,
             TicketService ticketService,
             RegulatoryUpdateRepository regulatoryUpdateRepository,
+            RequirementRepository requirementRepository,
             RegulatoryWorkflowService workflowService,
             ObjectMapper objectMapper) {
         this.service = service;
         this.ticketService = ticketService;
         this.regulatoryUpdateRepository = regulatoryUpdateRepository;
+        this.requirementRepository = requirementRepository;
         this.workflowService = workflowService;
         this.objectMapper = objectMapper;
     }
@@ -52,20 +64,16 @@ public class PolicyController {
 
     @PostMapping("/analyze")
     public ResponseEntity<JsonNode> analyze(@RequestBody Map<String, String> request) {
-
         String existingPolicy = request.get("existingPolicy");
         String newRegulation = request.get("newRegulation");
         String sourceLink = request.get("sourceLink");
-
         return ResponseEntity.ok(
                 service.analyzeAndParse(existingPolicy, newRegulation, sourceLink));
     }
 
     @PostMapping("/fetch-feed")
     public ResponseEntity<?> fetchFeed(@RequestBody Map<String, String> request) {
-
         try {
-
             String url = request.get("url");
 
             HttpRequest req = HttpRequest.newBuilder()
@@ -80,8 +88,7 @@ public class PolicyController {
 
             if (resp.statusCode() != 200) {
                 return ResponseEntity.status(resp.statusCode())
-                        .body(Map.of(
-                                "error", "feed_fetch_failed",
+                        .body(Map.of("error", "feed_fetch_failed",
                                 "message", "Feed returned status: " + resp.statusCode()));
             }
 
@@ -90,7 +97,6 @@ public class PolicyController {
                     .parse(new java.io.ByteArrayInputStream(resp.body().getBytes()));
 
             var items = doc.getElementsByTagName("item");
-
             if (items.getLength() == 0) {
                 items = doc.getElementsByTagName("entry");
             }
@@ -98,21 +104,21 @@ public class PolicyController {
             List<Map<String, Object>> result = new ArrayList<>();
 
             for (int i = 0; i < items.getLength(); i++) {
-
+                /* Process each feed item */
+                if (result.size() >= feedMaxItems) {
+                    logger.info("Reached max feed items limit ({}), stopping.", feedMaxItems);
+                    break;
+                }
                 var node = items.item(i);
-
                 String title = "";
                 String link = "";
                 String desc = "";
 
                 for (int j = 0; j < node.getChildNodes().getLength(); j++) {
-
                     var c = node.getChildNodes().item(j);
                     var name = c.getNodeName().toLowerCase();
 
-                    if (name.equals("title"))
-                        title = c.getTextContent();
-
+                    if (name.equals("title")) title = c.getTextContent();
                     if (name.equals("link")) {
                         if (c.getAttributes() != null && c.getAttributes().getNamedItem("href") != null) {
                             link = c.getAttributes().getNamedItem("href").getTextContent();
@@ -120,54 +126,37 @@ public class PolicyController {
                             link = c.getTextContent();
                         }
                     }
-
                     if (name.equals("description") || name.equals("summary"))
                         desc = c.getTextContent();
                 }
 
-                // ================================
-                // SKIP IF ALREADY PROCESSED
-                // ================================
-
+                // Skip already processed items
                 if (link != null && regulatoryUpdateRepository.existsBySourceLink(link)) {
+                    logger.info("Skipping already processed feed item: {}", title);
                     continue;
                 }
 
-                // ================================
-                // OPTIONAL REGULATORY FILTER
-                // ================================
-
-                String text = ((title != null ? title : "") + " " + (desc != null ? desc : "")).toLowerCase();
-
-                if (!(text.contains("regulation")
-                        || text.contains("compliance")
-                        || text.contains("risk")
-                        || text.contains("supervision")
-                        || text.contains("guidance")
-                        || text.contains("rule")
-                        || text.contains("requirement"))) {
-
-                    logger.info("Skipping non-regulatory feed item: {}", title);
-                    continue;
-                }
+                // NOTE: No keyword filter — all items from regulatory feeds are relevant
+                // The LLM will determine applicability during analysis
 
                 Map<String, Object> item = new HashMap<>();
-
                 item.put("title", title);
                 item.put("link", link);
                 item.put("description", desc);
 
                 try {
-
                     String regulationText = title + ". " + desc;
-
                     JsonNode analysis = service.analyzeFromFeed(regulationText, link);
-
                     item.put("analysis", analysis);
-
                 } catch (Exception ex) {
+                    logger.warn("Auto analysis failed for feed item: {}", title, ex);
+                }
 
-                    logger.warn("Auto analysis failed for feed item: {}", title);
+                try {
+                    logger.info("Waiting {}ms before next feed item analysis...", feedDelayMs);
+                    Thread.sleep(feedDelayMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
                 }
 
                 result.add(item);
@@ -176,11 +165,8 @@ public class PolicyController {
             return ResponseEntity.ok(result);
 
         } catch (Exception e) {
-
             return ResponseEntity.status(500)
-                    .body(Map.of(
-                            "error", "fetch_failed",
-                            "message", e.getMessage()));
+                    .body(Map.of("error", "fetch_failed", "message", e.getMessage()));
         }
     }
 
@@ -188,7 +174,6 @@ public class PolicyController {
 
     @PostMapping("/tickets")
     public ResponseEntity<?> createTicket(@RequestBody Map<String, Object> request) {
-
         Long requirementId = request.get("requirementId") == null
                 ? null
                 : Long.valueOf(request.get("requirementId").toString());
@@ -205,6 +190,54 @@ public class PolicyController {
         return ResponseEntity.ok(ticketService.listTickets());
     }
 
+    // ================= PER-UPDATE SUMMARY =================
+
+    @GetMapping("/updates/{id}/summary")
+    public ResponseEntity<?> getUpdateSummary(@PathVariable Long id) {
+        try {
+            var update = regulatoryUpdateRepository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Update not found"));
+
+            var requirements = requirementRepository.findByRegulatoryUpdateId(id);
+
+            long total = requirements.size();
+            long satisfied = requirements.stream().filter(r -> Boolean.TRUE.equals(r.getSatisfied())).count();
+            long policyUpdates = requirements.stream()
+                    .filter(r -> "update_policy".equalsIgnoreCase(r.getRecommendation())).count();
+            long newControls = requirements.stream()
+                    .filter(r -> "add_control".equalsIgnoreCase(r.getRecommendation())).count();
+            long systemRules = requirements.stream()
+                    .filter(r -> "implement_system_rule".equalsIgnoreCase(r.getRecommendation())).count();
+
+            // Routing breakdown
+            long complianceItems = requirements.stream()
+                    .filter(r -> "update_policy".equalsIgnoreCase(r.getRecommendation())
+                            || "add_control".equalsIgnoreCase(r.getRecommendation())).count();
+            long technologyItems = requirements.stream()
+                    .filter(r -> "implement_system_rule".equalsIgnoreCase(r.getRecommendation())).count();
+
+            ObjectNode summary = objectMapper.createObjectNode();
+            summary.put("updateId", id);
+            summary.put("title", update.getTitle());
+            summary.put("authority", update.getAuthority());
+            summary.put("status", update.getStatus().name());
+            summary.put("confidenceScore", update.getConfidenceScore());
+            summary.put("totalRequirements", total);
+            summary.put("alreadySatisfied", satisfied);
+            summary.put("policyUpdatesNeeded", policyUpdates);
+            summary.put("newControlsNeeded", newControls);
+            summary.put("systemImplementationsNeeded", systemRules);
+            summary.put("routedToCompliance", complianceItems);
+            summary.put("routedToTechnology", technologyItems);
+
+            return ResponseEntity.ok(summary);
+
+        } catch (Exception e) {
+            return ResponseEntity.status(500)
+                    .body(Map.of("error", e.getMessage()));
+        }
+    }
+
     // ================= EXPORT =================
 
     @PostMapping(path = "/export/pdf", produces = "application/pdf")
@@ -216,7 +249,8 @@ public class PolicyController {
                 .body(data);
     }
 
-    @PostMapping(path = "/export/docx", produces = "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    @PostMapping(path = "/export/docx",
+            produces = "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     public ResponseEntity<byte[]> exportDocx(@RequestBody JsonNode payload) throws Exception {
         byte[] data = generateDocx(payload);
         return ResponseEntity.ok()
@@ -267,13 +301,15 @@ public class PolicyController {
         return ResponseEntity.ok(workflowService.getAllowedTransitions(id));
     }
 
+    // ================= PDF/DOCX HELPERS =================
+
     private byte[] generatePdf(JsonNode payload) throws Exception {
         String text = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
         try (org.apache.pdfbox.pdmodel.PDDocument doc = new org.apache.pdfbox.pdmodel.PDDocument()) {
             org.apache.pdfbox.pdmodel.PDPage page = new org.apache.pdfbox.pdmodel.PDPage();
             doc.addPage(page);
-            try (org.apache.pdfbox.pdmodel.PDPageContentStream contents = new org.apache.pdfbox.pdmodel.PDPageContentStream(
-                    doc, page)) {
+            try (org.apache.pdfbox.pdmodel.PDPageContentStream contents =
+                         new org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page)) {
                 contents.beginText();
                 contents.setFont(org.apache.pdfbox.pdmodel.font.PDType1Font.HELVETICA, 10);
                 contents.setLeading(12f);
@@ -292,7 +328,8 @@ public class PolicyController {
     }
 
     private byte[] generateDocx(JsonNode payload) throws Exception {
-        try (org.apache.poi.xwpf.usermodel.XWPFDocument doc = new org.apache.poi.xwpf.usermodel.XWPFDocument()) {
+        try (org.apache.poi.xwpf.usermodel.XWPFDocument doc =
+                     new org.apache.poi.xwpf.usermodel.XWPFDocument()) {
             if (payload.has("policyDrafts") && payload.get("policyDrafts").isArray()) {
                 for (JsonNode d : payload.get("policyDrafts")) {
                     org.apache.poi.xwpf.usermodel.XWPFParagraph p1 = doc.createParagraph();

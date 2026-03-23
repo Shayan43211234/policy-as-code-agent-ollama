@@ -19,6 +19,57 @@ spring:
 groq:
   api-key: YOUR_GROQ_API_KEY_HERE
   model: llama-3.3-70b-versatile
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GROQ FREE TIER RATE LIMITS (as of March 2026 — llama-3.3-70b-versatile)
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Groq free tier enforces two hard limits on the on_demand service tier:
+  #
+  #   1. TPM  (Tokens Per Minute) : 12,000 tokens/minute
+  #   2. TPD  (Tokens Per Day)    : 100,000 tokens/day
+  #
+  # Each feed item analysis (title + description → full LLM prompt + response)
+  # consumes approximately 1,300–1,500 tokens per request.
+  #
+  # DELAY BETWEEN FEED ITEMS (feed-delay-ms):
+  # ------------------------------------------
+  # Without a delay, the controller loops through all feed items and fires
+  # Groq API calls back-to-back in milliseconds. With ~1,400 tokens per call,
+  # just 9 rapid calls will exceed the 12,000 TPM limit and cause 429 errors.
+  #
+  # Calculation:
+  #   12,000 TPM ÷ 1,400 tokens per call = ~8.5 safe calls per minute
+  #   60 seconds ÷ 8.5 calls             = ~7 seconds minimum between calls
+  #
+  # We set 7,000ms (7 seconds) to stay safely under the TPM limit with margin.
+  # Reducing below 5,000ms risks hitting the per-minute limit mid-feed.
+  # Increasing above 10,000ms is unnecessarily slow for a demo.
+  #
+  feed-delay-ms: 10000
+  # MAX FEED ITEMS PER FETCH (feed-max-items):
+  # -------------------------------------------
+  # The Federal Reserve RSS feed (and most regulatory feeds) contain 20+ items.
+  # Processing all items in one fetch would consume:
+  #
+  #   20 items × 1,400 tokens = 28,000 tokens per fetch
+  #
+  # With a 100,000 TPD daily limit, this means we can safely run the full demo
+  # approximately 3 times per day before hitting the daily quota:
+  #
+  #   100,000 TPD ÷ 28,000 tokens per fetch = ~3.5 full fetches per day
+  #
+  # For demo purposes, limiting to 5 items per fetch is recommended:
+  #   - Demonstrates the monitoring and auto-analysis capability clearly
+  #   - Consumes only ~7,000 tokens per fetch
+  #   - Allows the demo to be run 14+ times per day without hitting daily limits
+  #   - Keeps the demo session duration reasonable (5 items × 7s = ~35 seconds)
+  #
+  # To process the full feed (e.g. overnight batch or non-demo use),
+  # increase this value to 20 or remove the limit entirely by setting it to 0.
+  #
+  # Upgrade to Groq Dev Tier for higher limits:
+  # https://console.groq.com/settings/billing
+  #
+  feed-max-items: 5
 
 server:
   port: 8080

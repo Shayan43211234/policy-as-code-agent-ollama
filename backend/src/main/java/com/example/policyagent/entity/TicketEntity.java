@@ -2,7 +2,6 @@ package com.example.policyagent.entity;
 
 import jakarta.persistence.*;
 import java.time.Instant;
-import com.example.policyagent.entity.TicketStatus;
 
 @Entity
 @Table(name = "ticket_entity",
@@ -32,6 +31,10 @@ public class TicketEntity {
     @Column(nullable = false)
     private String recommendation;
 
+    // COMPLIANCE | TECHNOLOGY | RISK
+    @Column(name = "assigned_team", nullable = false)
+    private String assignedTeam;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private TicketStatus status = TicketStatus.OPEN;
@@ -57,6 +60,9 @@ public class TicketEntity {
 
     public String getRecommendation() { return recommendation; }
     public void setRecommendation(String recommendation) { this.recommendation = recommendation; }
+
+    public String getAssignedTeam() { return assignedTeam; }
+    public void setAssignedTeam(String assignedTeam) { this.assignedTeam = assignedTeam; }
 
     public TicketStatus getStatus() { return status; }
     public void setStatus(TicketStatus status) { this.status = status; }
